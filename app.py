@@ -258,9 +258,18 @@ def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
 
-    # 取得用戶名稱
+    # 取得用戶名稱（支援群組）
     try:
-        profile = line_bot_api.get_profile(user_id)
+        source = event.source
+        source_type = source.type  # "user", "group", "room"
+        if source_type == "group":
+            group_id = source.group_id
+            profile = line_bot_api.get_group_member_profile(group_id, user_id)
+        elif source_type == "room":
+            room_id = source.room_id
+            profile = line_bot_api.get_room_member_profile(room_id, user_id)
+        else:
+            profile = line_bot_api.get_profile(user_id)
         user_name = profile.display_name
     except Exception:
         user_name = "群組成員"
