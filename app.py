@@ -57,8 +57,17 @@ def parse_expense(text, user_name):
             text = text[len(prefix):].strip()
             break
 
+    # 格式1：有空格「午餐 150」「午餐 150 6/21」
+    # 格式2：無空格「午餐150」「買早餐100塊」「點心100元」
     pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*(.*)$'
     match = re.match(pattern, text)
+
+    if not match:
+        # 無空格格式：找最後一段純數字（排除品項本身含數字的情況）
+        # 例：「買早餐100塊」「711儲值500元」「點心100」
+        pattern2 = r'^(.*?[^\d])(\d+(?:\.\d+)?)[塊元圓]?\s*(.*)$'
+        match = re.match(pattern2, text)
+
     if not match:
         return None
 
