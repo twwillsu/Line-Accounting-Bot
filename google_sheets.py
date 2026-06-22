@@ -9,7 +9,6 @@ SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 DATA_SHEET = "記帳明細"
 
 def get_service():
-    """建立 Google Sheets API 連線"""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
         raise ValueError("缺少 GOOGLE_CREDENTIALS_JSON 環境變數")
@@ -19,24 +18,22 @@ def get_service():
 
 def append_expense(expense: dict) -> bool:
     """
-    寫入一筆支出記錄到 Google Sheets
-    欄位順序：日期 | 品項 | 分類 | 金額 | 付款人 | 記錄時間
+    欄位：日期時間 | 品項 | 分類 | 金額 | 付款人
+    （日期與時間合併為一欄，格式 YYYY/MM/DD HH:mm）
     """
     try:
         service = get_service()
-        now = datetime.now().strftime("%Y/%m/%d %H:%M")
         row = [
-            expense["date"],
+            expense["datetime"],   # YYYY/MM/DD HH:mm
             expense["item"],
             expense["category"],
             expense["amount"],
             expense["payer"],
-            now,
         ]
         body = {"values": [row]}
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{DATA_SHEET}!A:F",
+            range=f"{DATA_SHEET}!A:E",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body=body,
@@ -52,7 +49,7 @@ def get_summary() -> dict | None:
         service = get_service()
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{DATA_SHEET}!A2:F",
+            range=f"{DATA_SHEET}!A2:E",
         ).execute()
         rows = result.get("values", [])
         if not rows:
@@ -66,8 +63,8 @@ def get_summary() -> dict | None:
         for row in rows:
             if len(row) < 4:
                 continue
-            date_str = row[0]
-            if not date_str.startswith(current_month):
+            date_str = str(row[0])[:7]  # 取 YYYY/MM
+            if date_str != current_month:
                 continue
             try:
                 amount = float(row[3])
@@ -81,9 +78,7 @@ def get_summary() -> dict | None:
         if count == 0:
             return None
 
-        # 依金額排序
         by_category = dict(sorted(by_category.items(), key=lambda x: x[1], reverse=True))
-
         return {
             "month": current_month.replace("/", " 年 ") + " 月",
             "total": total,
