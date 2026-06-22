@@ -17,7 +17,7 @@ handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 
 # 支出分類關鍵字對照
 CATEGORIES = {
-    "餐飲": ["早餐", "午餐", "晚餐", "飲料", "咖啡", "宵夜", "火鍋", "燒烤", "便當", "麵", "飯", "吃"],
+    "餐飲": ["早餐", "午餐", "晚餐", "飲料", "咖啡", "宵夜", "火鍋", "燒烤", "便當", "麵", "飯", "吃", "買咖啡"],
     "交通": ["uber", "計程車", "捷運", "公車", "油費", "停車", "高鐵", "火車"],
     "購物": ["超市", "全聯", "costco", "好市多", "購物", "衣服", "鞋子"],
     "娛樂": ["電影", "KTV", "遊戲", "票", "展覽"],
@@ -26,7 +26,6 @@ CATEGORIES = {
 }
 
 def detect_category(item_name):
-    """自動偵測支出分類"""
     item_lower = item_name.lower()
     for category, keywords in CATEGORIES.items():
         for keyword in keywords:
@@ -34,23 +33,28 @@ def detect_category(item_name):
                 return category
     return "其他"
 
-def parse_expense(text, user_name):
-    """
-    解析多種輸入格式：
-    - 午餐 150
-    - 午餐 150 6/21
-    - /記帳 午餐 150
-    - 午餐 150 2024/6/21
-    """
-    text = text.strip()
+def get_user_name(event):
+    """取得用戶 LINE 顯示名稱，支援群組/聊天室"""
+    user_id = event.source.user_id
+    try:
+        source_type = event.source.type
+        if source_type == "group":
+            profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
+        elif source_type == "room":
+            profile = line_bot_api.get_room_member_profile(event.source.room_id, user_id)
+        else:
+            profile = line_bot_api.get_profile(user_id)
+        return profile.display_name
+    except Exception:
+        return "群組成員"
 
-    # 移除指令前綴
+def parse_expense(text, user_name):
+    text = text.strip()
     for prefix in ["/記帳", "/加", "/add"]:
         if text.startswith(prefix):
             text = text[len(prefix):].strip()
             break
 
-    # 正則：品項 金額 (可選日期)
     pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*(.*)$'
     match = re.match(pattern, text)
     if not match:
@@ -60,26 +64,28 @@ def parse_expense(text, user_name):
     amount = float(match.group(2))
     date_str = match.group(3).strip()
 
-    # 解析日期
+    now = datetime.now()
+
     if date_str:
         for fmt in ["%Y/%m/%d", "%m/%d", "%Y-%m-%d", "%m-%d"]:
             try:
                 parsed = datetime.strptime(date_str, fmt)
                 if fmt in ["%m/%d", "%m-%d"]:
-                    parsed = parsed.replace(year=datetime.now().year)
-                expense_date = parsed.strftime("%Y/%m/%d")
+                    parsed = parsed.replace(year=now.year)
+                # 合併日期 + 當前時間
+                expense_datetime = parsed.strftime("%Y/%m/%d") + now.strftime(" %H:%M")
                 break
             except ValueError:
                 continue
         else:
-            expense_date = datetime.now().strftime("%Y/%m/%d")
+            expense_datetime = now.strftime("%Y/%m/%d %H:%M")
     else:
-        expense_date = datetime.now().strftime("%Y/%m/%d")
+        expense_datetime = now.strftime("%Y/%m/%d %H:%M")
 
     category = detect_category(item)
 
     return {
-        "date": expense_date,
+        "datetime": expense_datetime,
         "item": item,
         "amount": amount,
         "category": category,
@@ -87,141 +93,75 @@ def parse_expense(text, user_name):
     }
 
 def build_confirm_flex(expense):
-    """建立 Flex Message 確認訊息"""
     bubble = {
         "type": "bubble",
         "size": "kilo",
         "header": {
             "type": "box",
             "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "✅ 記帳成功！",
-                    "weight": "bold",
-                    "color": "#ffffff",
-                    "size": "md"
-                }
-            ],
+            "contents": [{"type": "text", "text": "✅ 記帳成功！", "weight": "bold", "color": "#ffffff", "size": "md"}],
             "backgroundColor": "#27ACB2"
         },
         "body": {
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "📅 日期", "size": "sm", "color": "#888888", "flex": 2},
-                        {"type": "text", "text": expense["date"], "size": "sm", "flex": 3, "weight": "bold"}
-                    ],
-                    "margin": "md"
-                },
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "🛍️ 品項", "size": "sm", "color": "#888888", "flex": 2},
-                        {"type": "text", "text": expense["item"], "size": "sm", "flex": 3, "weight": "bold"}
-                    ],
-                    "margin": "md"
-                },
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "🏷️ 分類", "size": "sm", "color": "#888888", "flex": 2},
-                        {"type": "text", "text": expense["category"], "size": "sm", "flex": 3}
-                    ],
-                    "margin": "md"
-                },
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "💰 金額", "size": "sm", "color": "#888888", "flex": 2},
-                        {"type": "text", "text": f"NT$ {expense['amount']:.0f}", "size": "sm", "flex": 3,
-                         "weight": "bold", "color": "#E74C3C"}
-                    ],
-                    "margin": "md"
-                },
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "👤 付款人", "size": "sm", "color": "#888888", "flex": 2},
-                        {"type": "text", "text": expense["payer"], "size": "sm", "flex": 3}
-                    ],
-                    "margin": "md"
-                },
+                {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                    {"type": "text", "text": "📅 時間", "size": "sm", "color": "#888888", "flex": 2},
+                    {"type": "text", "text": expense["datetime"], "size": "sm", "flex": 3, "weight": "bold"}
+                ]},
+                {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                    {"type": "text", "text": "🛍️ 品項", "size": "sm", "color": "#888888", "flex": 2},
+                    {"type": "text", "text": expense["item"], "size": "sm", "flex": 3, "weight": "bold"}
+                ]},
+                {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                    {"type": "text", "text": "🏷️ 分類", "size": "sm", "color": "#888888", "flex": 2},
+                    {"type": "text", "text": expense["category"], "size": "sm", "flex": 3}
+                ]},
+                {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                    {"type": "text", "text": "💰 金額", "size": "sm", "color": "#888888", "flex": 2},
+                    {"type": "text", "text": f"NT$ {expense['amount']:.0f}", "size": "sm", "flex": 3,
+                     "weight": "bold", "color": "#E74C3C"}
+                ]},
+                {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                    {"type": "text", "text": "👤 付款人", "size": "sm", "color": "#888888", "flex": 2},
+                    {"type": "text", "text": expense["payer"], "size": "sm", "flex": 3}
+                ]},
             ]
         },
         "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "已同步至 Google Sheets 📊",
-                    "size": "xs",
-                    "color": "#888888",
-                    "align": "center"
-                }
-            ]
+            "type": "box", "layout": "vertical",
+            "contents": [{"type": "text", "text": "已同步至 Google Sheets 📊", "size": "xs", "color": "#888888", "align": "center"}]
         }
     }
     return FlexSendMessage(alt_text="記帳成功", contents=bubble)
 
 def build_summary_flex(summary):
-    """建立本月摘要 Flex Message"""
     items = []
     for cat, amt in summary["by_category"].items():
         items.append({
-            "type": "box",
-            "layout": "horizontal",
+            "type": "box", "layout": "horizontal", "margin": "sm",
             "contents": [
                 {"type": "text", "text": cat, "size": "sm", "flex": 3},
-                {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm", "flex": 2,
-                 "align": "end", "weight": "bold"}
-            ],
-            "margin": "sm"
+                {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm", "flex": 2, "align": "end", "weight": "bold"}
+            ]
         })
-
     bubble = {
         "type": "bubble",
         "header": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {"type": "text", "text": f"📊 {summary['month']} 支出摘要",
-                 "weight": "bold", "color": "#ffffff", "size": "md"}
-            ],
+            "type": "box", "layout": "vertical",
+            "contents": [{"type": "text", "text": f"📊 {summary['month']} 支出摘要", "weight": "bold", "color": "#ffffff", "size": "md"}],
             "backgroundColor": "#7B66FF"
         },
         "body": {
-            "type": "box",
-            "layout": "vertical",
+            "type": "box", "layout": "vertical",
             "contents": [
-                {
-                    "type": "text",
-                    "text": f"總支出：NT$ {summary['total']:.0f}",
-                    "weight": "bold",
-                    "size": "lg",
-                    "color": "#E74C3C",
-                    "margin": "md"
-                },
+                {"type": "text", "text": f"總支出：NT$ {summary['total']:.0f}", "weight": "bold", "size": "lg", "color": "#E74C3C", "margin": "md"},
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": "分類明細", "size": "sm", "color": "#888888", "margin": "md"},
                 *items,
                 {"type": "separator", "margin": "md"},
-                {
-                    "type": "text",
-                    "text": f"筆數：{summary['count']} 筆",
-                    "size": "xs",
-                    "color": "#888888",
-                    "margin": "sm"
-                }
+                {"type": "text", "text": f"筆數：{summary['count']} 筆", "size": "xs", "color": "#888888", "margin": "sm"}
             ]
         }
     }
@@ -241,7 +181,8 @@ HELP_TEXT = """💡 記帳機器人使用說明
 【自動功能】
   ✅ 自動分類品項
   ✅ 同步 Google Sheets
-  ✅ 圓餅圖自動更新"""
+  ✅ 圓餅圖＋折線圖自動更新
+  ✅ 每月自動清除，存入歷史"""
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -256,25 +197,9 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
-    user_id = event.source.user_id
 
-    # 取得用戶名稱（支援群組）
-    try:
-        source = event.source
-        source_type = source.type  # "user", "group", "room"
-        if source_type == "group":
-            group_id = source.group_id
-            profile = line_bot_api.get_group_member_profile(group_id, user_id)
-        elif source_type == "room":
-            room_id = source.room_id
-            profile = line_bot_api.get_room_member_profile(room_id, user_id)
-        else:
-            profile = line_bot_api.get_profile(user_id)
-        user_name = profile.display_name
-    except Exception:
-        user_name = "群組成員"
+    user_name = get_user_name(event)
 
-    # 指令判斷
     if text in ["/幫助", "/help", "幫助", "說明"]:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=HELP_TEXT))
         return
@@ -284,19 +209,16 @@ def handle_message(event):
         if summary:
             line_bot_api.reply_message(event.reply_token, build_summary_flex(summary))
         else:
-            line_bot_api.reply_message(event.reply_token,
-                TextSendMessage(text="本月尚無記帳資料 📭"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本月尚無記帳資料 📭"))
         return
 
-    # 嘗試解析記帳
     expense = parse_expense(text, user_name)
     if expense:
         success = append_expense(expense)
         if success:
             line_bot_api.reply_message(event.reply_token, build_confirm_flex(expense))
         else:
-            line_bot_api.reply_message(event.reply_token,
-                TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
