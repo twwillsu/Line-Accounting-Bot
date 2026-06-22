@@ -1,28 +1,27 @@
 import os
 import re
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, FlexSendMessage
-)
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, FlexSendMessage
 from google_sheets import append_expense, get_summary
-import json
 
 app = Flask(__name__)
-
 line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 
+TZ_TAIPEI = timezone(timedelta(hours=8))
+
 CATEGORIES = {
-    "餐飲": ["早餐", "午餐", "晚餐", "飲料", "咖啡", "宵夜", "火鍋", "燒烤", "便當", "麵", "飯", "吃", "買咖啡"],
+    "餐飲": ["早餐", "午餐", "晚餐", "飲料", "咖啡", "宵夜", "火鍋", "燒烤", "便當", "麵", "飯", "吃"],
     "交通": ["uber", "計程車", "捷運", "公車", "油費", "停車", "高鐵", "火車"],
     "購物": ["超市", "全聯", "costco", "好市多", "購物", "衣服", "鞋子"],
-    "娛樂": ["電影", "KTV", "遊戲", "票", "展覽"],
+    "娛樂": ["電影", "ktv", "遊戲", "票", "展覽"],
     "日用品": ["衛生紙", "清潔", "洗髮", "洗衣"],
     "醫療": ["藥", "診所", "醫院", "掛號"],
+    "儲值": ["儲值", "加值"],
 }
 
 def detect_category(item_name):
@@ -33,18 +32,22 @@ def detect_category(item_name):
                 return category
     return "其他"
 
+def get_taiwan_time():
+    """取得台灣時間 UTC+8"""
+    return datetime.now(TZ_TAIPEI)
+
 def get_user_name(event):
     user_id = event.source.user_id
     try:
         source_type = event.source.type
-        print(f"[DEBUG] source_type={source_type}, user_id={user_id}")
+        print(f"[DEBUG] source_type={source_type}")
         if source_type == "group":
             profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
         elif source_type == "room":
             profile = line_bot_api.get_room_member_profile(event.source.room_id, user_id)
         else:
             profile = line_bot_api.get_profile(user_id)
-        print(f"[DEBUG] display_name={profile.display_name}")
+        print(f"[DEBUG] name={profile.display_name}")
         return profile.display_name
     except Exception as e:
         print(f"[DEBUG] get_user_name error: {e}")
@@ -58,13 +61,11 @@ def parse_expense(text, user_name):
             break
 
     # 格式1：有空格「午餐 150」「午餐 150 6/21」
-    # 格式2：無空格「午餐150」「買早餐100塊」「點心100元」
-    pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*(.*)$'
-    match = re.match(pattern, text)
+    pattern1 = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*(.*)$'
+    match = re.match(pattern1, text)
 
     if not match:
-        # 無空格格式：找最後一段純數字（排除品項本身含數字的情況）
-        # 例：「買早餐100塊」「711儲值500元」「點心100」
+        # 格式2：無空格「午餐150」「買早餐100塊」「711儲值500元」
         pattern2 = r'^(.*?[^\d])(\d+(?:\.\d+)?)[塊元圓]?\s*(.*)$'
         match = re.match(pattern2, text)
 
@@ -74,9 +75,8 @@ def parse_expense(text, user_name):
     item = match.group(1).strip()
     amount = float(match.group(2))
     date_str = match.group(3).strip()
-    now = datetime.utcnow().replace(tzinfo=None)
-    from datetime import timezone, timedelta
-    now = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+
+    now = get_taiwan_time()
 
     if date_str:
         for fmt in ["%Y/%m/%d", "%m/%d", "%Y-%m-%d", "%m-%d"]:
@@ -94,7 +94,7 @@ def parse_expense(text, user_name):
         expense_datetime = now.strftime("%Y/%m/%d %H:%M")
 
     category = detect_category(item)
-    print(f"[DEBUG] parsed: item={item}, amount={amount}, datetime={expense_datetime}, category={category}")
+    print(f"[DEBUG] item={item}, amount={amount}, dt={expense_datetime}, cat={category}")
 
     return {
         "datetime": expense_datetime,
@@ -106,8 +106,7 @@ def parse_expense(text, user_name):
 
 def build_confirm_flex(expense):
     bubble = {
-        "type": "bubble",
-        "size": "kilo",
+        "type": "bubble", "size": "kilo",
         "header": {
             "type": "box", "layout": "vertical",
             "contents": [{"type": "text", "text": "✅ 記帳成功！", "weight": "bold", "color": "#ffffff", "size": "md"}],
@@ -141,7 +140,8 @@ def build_confirm_flex(expense):
         },
         "footer": {
             "type": "box", "layout": "vertical",
-            "contents": [{"type": "text", "text": "已同步至 Google Sheets 📊", "size": "xs", "color": "#888888", "align": "center"}]
+            "contents": [{"type": "text", "text": "已同步至 Google Sheets 📊",
+                          "size": "xs", "color": "#888888", "align": "center"}]
         }
     }
     return FlexSendMessage(alt_text="記帳成功", contents=bubble)
@@ -150,12 +150,18 @@ HELP_TEXT = """💡 記帳機器人使用說明
 
 【記帳格式】（日期可省略）
   午餐 150
-  午餐 150 6/21
-  /記帳 咖啡 75 2024/6/21
+  買早餐100塊
+  /記帳 咖啡 75 6/21
 
 【查詢指令】
   /摘要 → 本月支出總覽
-  /幫助 → 顯示此說明"""
+  /幫助 → 顯示此說明
+
+【自動功能】
+  ✅ 自動分類品項
+  ✅ 同步 Google Sheets
+  ✅ 圓餅圖＋折線圖自動更新
+  ✅ 每月自動清除，存入歷史"""
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -172,7 +178,6 @@ def handle_message(event):
     try:
         text = event.message.text.strip()
         print(f"[DEBUG] received: {text}")
-
         user_name = get_user_name(event)
 
         if text in ["/幫助", "/help", "幫助", "說明"]:
@@ -184,43 +189,60 @@ def handle_message(event):
             if summary:
                 items = []
                 for cat, amt in summary["by_category"].items():
-                    items.append({"type": "box", "layout": "horizontal", "margin": "sm", "contents": [
-                        {"type": "text", "text": cat, "size": "sm", "flex": 3},
-                        {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm", "flex": 2, "align": "end", "weight": "bold"}
-                    ]})
+                    items.append({
+                        "type": "box", "layout": "horizontal", "margin": "sm",
+                        "contents": [
+                            {"type": "text", "text": cat, "size": "sm", "flex": 3},
+                            {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm",
+                             "flex": 2, "align": "end", "weight": "bold"}
+                        ]
+                    })
                 bubble = {
                     "type": "bubble",
-                    "header": {"type": "box", "layout": "vertical",
-                        "contents": [{"type": "text", "text": f"📊 {summary['month']} 支出摘要", "weight": "bold", "color": "#ffffff", "size": "md"}],
-                        "backgroundColor": "#7B66FF"},
-                    "body": {"type": "box", "layout": "vertical", "contents": [
-                        {"type": "text", "text": f"總支出：NT$ {summary['total']:.0f}", "weight": "bold", "size": "lg", "color": "#E74C3C", "margin": "md"},
-                        {"type": "separator", "margin": "md"},
-                        *items,
-                    ]}
+                    "header": {
+                        "type": "box", "layout": "vertical",
+                        "contents": [{"type": "text",
+                                      "text": f"📊 {summary['month']} 支出摘要",
+                                      "weight": "bold", "color": "#ffffff", "size": "md"}],
+                        "backgroundColor": "#7B66FF"
+                    },
+                    "body": {
+                        "type": "box", "layout": "vertical",
+                        "contents": [
+                            {"type": "text", "text": f"總支出：NT$ {summary['total']:.0f}",
+                             "weight": "bold", "size": "lg", "color": "#E74C3C", "margin": "md"},
+                            {"type": "separator", "margin": "md"},
+                            *items,
+                            {"type": "separator", "margin": "md"},
+                            {"type": "text", "text": f"共 {summary['count']} 筆",
+                             "size": "xs", "color": "#888888", "margin": "sm"}
+                        ]
+                    }
                 }
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="本月摘要", contents=bubble))
+                line_bot_api.reply_message(event.reply_token,
+                                           FlexSendMessage(alt_text="本月摘要", contents=bubble))
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本月尚無記帳資料 📭"))
+                line_bot_api.reply_message(event.reply_token,
+                                           TextSendMessage(text="本月尚無記帳資料 📭"))
             return
 
         expense = parse_expense(text, user_name)
-        print(f"[DEBUG] expense={expense}")
         if expense:
             success = append_expense(expense)
-            print(f"[DEBUG] append_expense result={success}")
+            print(f"[DEBUG] append result={success}")
             if success:
                 line_bot_api.reply_message(event.reply_token, build_confirm_flex(expense))
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
+                line_bot_api.reply_message(event.reply_token,
+                                           TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
         else:
-            print(f"[DEBUG] not an expense, ignoring")
+            print(f"[DEBUG] not parsed, ignore")
 
     except Exception as e:
-        print(f"[ERROR] handle_message: {e}")
-        print(traceback.format_exc())
+        print(f"[ERROR] {e}\n{traceback.format_exc()}")
         try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 系統錯誤：{str(e)}"))
+            line_bot_api.reply_message(event.reply_token,
+                                       TextSendMessage(text=f"❌ 系統錯誤：{str(e)}"))
         except:
             pass
 
