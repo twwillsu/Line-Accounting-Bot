@@ -1,5 +1,6 @@
 import os
 import re
+import traceback
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -15,7 +16,6 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 
-# 支出分類關鍵字對照
 CATEGORIES = {
     "餐飲": ["早餐", "午餐", "晚餐", "飲料", "咖啡", "宵夜", "火鍋", "燒烤", "便當", "麵", "飯", "吃", "買咖啡"],
     "交通": ["uber", "計程車", "捷運", "公車", "油費", "停車", "高鐵", "火車"],
@@ -34,18 +34,20 @@ def detect_category(item_name):
     return "其他"
 
 def get_user_name(event):
-    """取得用戶 LINE 顯示名稱，支援群組/聊天室"""
     user_id = event.source.user_id
     try:
         source_type = event.source.type
+        print(f"[DEBUG] source_type={source_type}, user_id={user_id}")
         if source_type == "group":
             profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
         elif source_type == "room":
             profile = line_bot_api.get_room_member_profile(event.source.room_id, user_id)
         else:
             profile = line_bot_api.get_profile(user_id)
+        print(f"[DEBUG] display_name={profile.display_name}")
         return profile.display_name
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] get_user_name error: {e}")
         return "群組成員"
 
 def parse_expense(text, user_name):
@@ -63,7 +65,6 @@ def parse_expense(text, user_name):
     item = match.group(1).strip()
     amount = float(match.group(2))
     date_str = match.group(3).strip()
-
     now = datetime.now()
 
     if date_str:
@@ -72,7 +73,6 @@ def parse_expense(text, user_name):
                 parsed = datetime.strptime(date_str, fmt)
                 if fmt in ["%m/%d", "%m-%d"]:
                     parsed = parsed.replace(year=now.year)
-                # 合併日期 + 當前時間
                 expense_datetime = parsed.strftime("%Y/%m/%d") + now.strftime(" %H:%M")
                 break
             except ValueError:
@@ -83,6 +83,7 @@ def parse_expense(text, user_name):
         expense_datetime = now.strftime("%Y/%m/%d %H:%M")
 
     category = detect_category(item)
+    print(f"[DEBUG] parsed: item={item}, amount={amount}, datetime={expense_datetime}, category={category}")
 
     return {
         "datetime": expense_datetime,
@@ -97,14 +98,12 @@ def build_confirm_flex(expense):
         "type": "bubble",
         "size": "kilo",
         "header": {
-            "type": "box",
-            "layout": "vertical",
+            "type": "box", "layout": "vertical",
             "contents": [{"type": "text", "text": "✅ 記帳成功！", "weight": "bold", "color": "#ffffff", "size": "md"}],
             "backgroundColor": "#27ACB2"
         },
         "body": {
-            "type": "box",
-            "layout": "vertical",
+            "type": "box", "layout": "vertical",
             "contents": [
                 {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
                     {"type": "text", "text": "📅 時間", "size": "sm", "color": "#888888", "flex": 2},
@@ -136,37 +135,6 @@ def build_confirm_flex(expense):
     }
     return FlexSendMessage(alt_text="記帳成功", contents=bubble)
 
-def build_summary_flex(summary):
-    items = []
-    for cat, amt in summary["by_category"].items():
-        items.append({
-            "type": "box", "layout": "horizontal", "margin": "sm",
-            "contents": [
-                {"type": "text", "text": cat, "size": "sm", "flex": 3},
-                {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm", "flex": 2, "align": "end", "weight": "bold"}
-            ]
-        })
-    bubble = {
-        "type": "bubble",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "contents": [{"type": "text", "text": f"📊 {summary['month']} 支出摘要", "weight": "bold", "color": "#ffffff", "size": "md"}],
-            "backgroundColor": "#7B66FF"
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "contents": [
-                {"type": "text", "text": f"總支出：NT$ {summary['total']:.0f}", "weight": "bold", "size": "lg", "color": "#E74C3C", "margin": "md"},
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "分類明細", "size": "sm", "color": "#888888", "margin": "md"},
-                *items,
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": f"筆數：{summary['count']} 筆", "size": "xs", "color": "#888888", "margin": "sm"}
-            ]
-        }
-    }
-    return FlexSendMessage(alt_text="本月支出摘要", contents=bubble)
-
 HELP_TEXT = """💡 記帳機器人使用說明
 
 【記帳格式】（日期可省略）
@@ -176,13 +144,7 @@ HELP_TEXT = """💡 記帳機器人使用說明
 
 【查詢指令】
   /摘要 → 本月支出總覽
-  /幫助 → 顯示此說明
-
-【自動功能】
-  ✅ 自動分類品項
-  ✅ 同步 Google Sheets
-  ✅ 圓餅圖＋折線圖自動更新
-  ✅ 每月自動清除，存入歷史"""
+  /幫助 → 顯示此說明"""
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -196,29 +158,60 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
+    try:
+        text = event.message.text.strip()
+        print(f"[DEBUG] received: {text}")
 
-    user_name = get_user_name(event)
+        user_name = get_user_name(event)
 
-    if text in ["/幫助", "/help", "幫助", "說明"]:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=HELP_TEXT))
-        return
+        if text in ["/幫助", "/help", "幫助", "說明"]:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=HELP_TEXT))
+            return
 
-    if text in ["/摘要", "/summary", "摘要", "本月"]:
-        summary = get_summary()
-        if summary:
-            line_bot_api.reply_message(event.reply_token, build_summary_flex(summary))
+        if text in ["/摘要", "/summary", "摘要", "本月"]:
+            summary = get_summary()
+            if summary:
+                items = []
+                for cat, amt in summary["by_category"].items():
+                    items.append({"type": "box", "layout": "horizontal", "margin": "sm", "contents": [
+                        {"type": "text", "text": cat, "size": "sm", "flex": 3},
+                        {"type": "text", "text": f"NT$ {amt:.0f}", "size": "sm", "flex": 2, "align": "end", "weight": "bold"}
+                    ]})
+                bubble = {
+                    "type": "bubble",
+                    "header": {"type": "box", "layout": "vertical",
+                        "contents": [{"type": "text", "text": f"📊 {summary['month']} 支出摘要", "weight": "bold", "color": "#ffffff", "size": "md"}],
+                        "backgroundColor": "#7B66FF"},
+                    "body": {"type": "box", "layout": "vertical", "contents": [
+                        {"type": "text", "text": f"總支出：NT$ {summary['total']:.0f}", "weight": "bold", "size": "lg", "color": "#E74C3C", "margin": "md"},
+                        {"type": "separator", "margin": "md"},
+                        *items,
+                    ]}
+                }
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="本月摘要", contents=bubble))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本月尚無記帳資料 📭"))
+            return
+
+        expense = parse_expense(text, user_name)
+        print(f"[DEBUG] expense={expense}")
+        if expense:
+            success = append_expense(expense)
+            print(f"[DEBUG] append_expense result={success}")
+            if success:
+                line_bot_api.reply_message(event.reply_token, build_confirm_flex(expense))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="本月尚無記帳資料 📭"))
-        return
+            print(f"[DEBUG] not an expense, ignoring")
 
-    expense = parse_expense(text, user_name)
-    if expense:
-        success = append_expense(expense)
-        if success:
-            line_bot_api.reply_message(event.reply_token, build_confirm_flex(expense))
-        else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 記帳失敗，請稍後再試"))
+    except Exception as e:
+        print(f"[ERROR] handle_message: {e}")
+        print(traceback.format_exc())
+        try:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 系統錯誤：{str(e)}"))
+        except:
+            pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
